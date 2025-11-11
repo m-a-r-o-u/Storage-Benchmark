@@ -226,20 +226,62 @@ def format_bytes(num_bytes: int) -> str:
 
 
 def summarize_results(results: Iterable[BenchmarkResult]) -> None:
+    results = list(results)
+
     print("\nBenchmark summary:\n")
-    header = (
-        f"{'Target':<30} {'Data Size':>12} {'Files':>7}"
-        f" {'Write (s)':>12} {'Write (Gb/s)':>14}"
-        f" {'Read (s)':>12} {'Read (Gb/s)':>13}"
-    )
-    print(header)
-    print("-" * len(header))
-    for result in results:
-        print(
-            f"{str(result.target):<30} {format_bytes(result.total_bytes):>12} {result.num_files:>7}"
-            f" {result.write_seconds:12.2f} {result.write_throughput_gbps:14.2f}"
-            f" {result.read_seconds:12.2f} {result.read_throughput_gbps:13.2f}"
+
+    if not results:
+        print("No benchmark results to display.\n")
+        return
+
+    print("Targets:")
+    for index, result in enumerate(results, start=1):
+        print(f"  {index}: {result.target}")
+    print()
+
+    rows = []
+    for index, result in enumerate(results, start=1):
+        rows.append(
+            {
+                "target": str(index),
+                "data_size": format_bytes(result.total_bytes),
+                "files": str(result.num_files),
+                "write_seconds": f"{result.write_seconds:.2f}",
+                "write_gbps": f"{result.write_throughput_gbps:.2f}",
+                "read_seconds": f"{result.read_seconds:.2f}",
+                "read_gbps": f"{result.read_throughput_gbps:.2f}",
+            }
         )
+
+    columns = [
+        ("Target #", "target", ">"),
+        ("Data Size", "data_size", ">"),
+        ("Files", "files", ">"),
+        ("Write (s)", "write_seconds", ">"),
+        ("Write (Gb/s)", "write_gbps", ">"),
+        ("Read (s)", "read_seconds", ">"),
+        ("Read (Gb/s)", "read_gbps", ">"),
+    ]
+
+    widths = {
+        key: max(len(header), *(len(row[key]) for row in rows))
+        for header, key, _ in columns
+    }
+
+    def format_line(values: dict[str, str]) -> str:
+        return "  ".join(
+            f"{values[key]:{align}{widths[key]}}" for _, key, align in columns
+        )
+
+    header_line = "  ".join(
+        f"{header:{align}{widths[key]}}" for header, key, align in columns
+    )
+    separator = "-" * len(header_line)
+
+    print(header_line)
+    print(separator)
+    for row in rows:
+        print(format_line(row))
     print()
 
 
