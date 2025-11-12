@@ -34,6 +34,9 @@ Key options:
 - `--chunk-size-mb`: Size (in MiB) of each tensor shard saved to disk. Larger
   chunks reduce metadata pressure while smaller chunks highlight small-file
   performance.
+- `--seed`: Random seed used when synthesizing the tensor data.
+- `--samples`: Run multiple write/read cycles per target and report the median
+  throughput. Increases runtime but reduces noise from transient effects.
 - `--num-workers`: Number of PyTorch `DataLoader` workers used during the read
   phase. Increase this to simulate high parallelism.
 - `--pin-memory`: Enable pinned host memory for the read loader. Combine with
@@ -42,6 +45,10 @@ Key options:
   the specified device (e.g., `cuda:0`) to capture end-to-end throughput.
 - `--fsync`: Issue an `fsync` call after writing each shard to minimize the
   impact of page cache effects.
+- `--drop-caches`: Attempt to flush and drop the OS page cache before each read
+  phase (Linux only, requires elevated privileges). This makes the read
+  benchmark much more indicative of the underlying storage hardware instead of
+  serving data from RAM.
 - `--keep-data`: Preserve the generated dataset so that you can run additional
   experiments (e.g., repeat the read benchmark separately).
 
@@ -52,8 +59,11 @@ for your infrastructure.
 
 ## Notes
 
-- Clearing the operating system page cache between read passes (outside the
-  script) can help isolate storage hardware performance from cache effects.
+- The script automatically synchronizes pending writes before the read pass so
+  that throughput reflects the storage device instead of buffered writes.
+- Use `--drop-caches` (or manually clear the OS caches) between passes to avoid
+  measuring RAM-backed reads. Without this, SSD and HDD results may look
+  artificially similar because the reads are served from the page cache.
 - When benchmarking remote or burst-buffer filesystems, consider increasing the
   total data volume (`--total-size-gb`) to amortize initial warm-up costs.
 - If GPU DMA is included, ensure that other workloads are not contending for the
