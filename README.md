@@ -57,6 +57,39 @@ Gb/s throughput. You can run the benchmark multiple times—using different
 chunk sizes, worker counts, or storage mount points—to build a comparison table
 for your infrastructure.
 
+### Run the recommended scenarios automatically
+
+A convenience wrapper, [`run_benchmarks.sh`](./run_benchmarks.sh), executes the
+five recommended exercises sequentially. The script prints a short description
+of each scenario, the exact `python storage_benchmark.py` command that is run,
+and the benchmark results. Output is streamed through `tee`, so you see the
+progress live while it is also appended to a log file for later inspection.
+
+```bash
+./run_benchmarks.sh --total-size-gb 25 ./ai ./lc ./home
+```
+
+Key behavior:
+
+- `--total-size-gb` is optional; when omitted the script discovers the default
+  value from `storage_benchmark.py` (currently `2.0`).
+- Use `--log-file results/benchmark.log` to place the combined output in a
+  specific location. Otherwise a timestamped file such as
+  `benchmark_runs_20240101_120000.log` is created in the current directory.
+- Provide one or more target directories as positional arguments. The same set
+  of targets is used for every scenario.
+- The final "Cold-cache verification" scenario passes `--drop-caches`, which
+  requires elevated privileges on Linux. Run the wrapper with the necessary
+  permissions (e.g., `sudo ./run_benchmarks.sh ...`) to exercise that test fully.
+
+The wrapper runs the following scenarios with your chosen targets:
+
+1. Baseline throughput comparison across targets.
+2. Metadata-pressure sensitivity using 8 MiB chunks.
+3. Parallel read stress with 16 loader workers and three samples.
+4. End-to-end GPU ingest measurement with pinned memory and `cuda:0`.
+5. Cold-cache verification with `--fsync` and `--drop-caches`.
+
 ## Notes
 
 - The script automatically synchronizes pending writes before the read pass so
