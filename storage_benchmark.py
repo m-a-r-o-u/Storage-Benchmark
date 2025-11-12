@@ -9,9 +9,10 @@ import argparse
 import math
 import os
 import shutil
+import statistics
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, List, Sequence
 
@@ -25,8 +26,24 @@ class BenchmarkResult:
     run_dir: Path
     num_files: int
     total_bytes: int
-    write_seconds: float
-    read_seconds: float
+    write_samples: List[float] = field(default_factory=list)
+    read_samples: List[float] = field(default_factory=list)
+
+    @property
+    def num_samples(self) -> int:
+        return len(self.write_samples)
+
+    @property
+    def write_seconds(self) -> float:
+        if not self.write_samples:
+            raise RuntimeError("No write samples recorded")
+        return statistics.median(self.write_samples)
+
+    @property
+    def read_seconds(self) -> float:
+        if not self.read_samples:
+            raise RuntimeError("No read samples recorded")
+        return statistics.median(self.read_samples)
 
     @property
     def write_throughput_gbps(self) -> float:
@@ -86,6 +103,36 @@ def ensure_unique_directory(base_dir: Path, prefix: str) -> Path:
             continue
         return candidate
     raise RuntimeError("Unable to create a unique benchmark directory")
+
+
+def flush_os_buffers() -> None:
+    """Ensure pending writes reach the storage device."""
+
+    sync = getattr(os, "sync", None)
+    if callable(sync):
+        sync()
+
+
+def drop_linux_page_cache() -> bool:
+    """Attempt to evict the Linux page cache to avoid warm reads."""
+
+    drop_path = Path("/proc/sys/vm/drop_caches")
+    if not drop_path.exists():
+        return False
+
+    flush_os_buffers()
+    try:
+        drop_path.write_text("3\n")
+    except PermissionError:
+        print(
+            "Warning: unable to drop caches (permission denied). "
+            "Run with elevated privileges to enable --drop-caches.",
+            file=sys.stderr,
+        )
+        return False
+    except OSError:
+        return False
+    return True
 
 
 def write_dataset(
@@ -179,26 +226,70 @@ def benchmark_target(
         raise NotADirectoryError(f"Target path is not a directory: {target}")
 
     run_dir = ensure_unique_directory(target, prefix="storage_benchmark")
-    try:
-        files, bytes_written, write_seconds = write_dataset(
-            run_dir,
-            total_size_gb=args.total_size_gb,
-            chunk_size_mb=args.chunk_size_mb,
-            dtype=args.dtype,
-            seed=args.seed,
-            fsync=args.fsync,
-        )
+    write_samples: List[float] = []
+    read_samples: List[float] = []
+    num_files = 0
+    total_bytes = 0
+    drop_warning_printed = False
 
-        total_bytes, read_seconds = read_dataset(
-            files,
-            num_workers=args.num_workers,
-            map_location=torch.device("cpu"),
-            pin_memory=args.pin_memory,
-            prefetch_factor=args.prefetch_factor,
-            persistent_workers=args.persistent_workers,
-            transfer_to_device=args.transfer_to_device,
-            device=args.device,
-        )
+    try:
+        for sample_index in range(args.samples):
+            sample_dir = run_dir / f"sample_{sample_index:02d}"
+            sample_dir.mkdir(parents=True, exist_ok=False)
+
+            files, bytes_written, write_seconds = write_dataset(
+                sample_dir,
+                total_size_gb=args.total_size_gb,
+                chunk_size_mb=args.chunk_size_mb,
+                dtype=args.dtype,
+                seed=args.seed + sample_index,
+                fsync=args.fsync,
+            )
+
+            flush_os_buffers()
+
+            drop_success = False
+            if args.drop_caches:
+                drop_success = drop_linux_page_cache()
+                if not drop_success and not drop_warning_printed:
+                    print(
+                        "Warning: could not drop caches; read benchmark may still "
+                        "hit the page cache.",
+                        file=sys.stderr,
+                    )
+                    drop_warning_printed = True
+
+            total_bytes, read_seconds = read_dataset(
+                files,
+                num_workers=args.num_workers,
+                map_location=torch.device("cpu"),
+                pin_memory=args.pin_memory,
+                prefetch_factor=args.prefetch_factor,
+                persistent_workers=args.persistent_workers,
+                transfer_to_device=args.transfer_to_device,
+                device=args.device,
+            )
+
+            write_samples.append(write_seconds)
+            read_samples.append(read_seconds)
+            num_files = len(files)
+
+            if bytes_written != total_bytes:
+                raise RuntimeError(
+                    "Mismatch between written and read bytes: "
+                    f"{bytes_written} vs {total_bytes}"
+                )
+
+            write_gbps = (bytes_written * 8) / (write_seconds * 1e9)
+            read_gbps = (total_bytes * 8) / (read_seconds * 1e9)
+            print(
+                f"  Sample {sample_index + 1}/{args.samples}: "
+                f"write {write_seconds:.2f}s ({write_gbps:.2f} Gb/s), "
+                f"read {read_seconds:.2f}s ({read_gbps:.2f} Gb/s)"
+            )
+
+            if not args.keep_data:
+                shutil.rmtree(sample_dir, ignore_errors=True)
     finally:
         if not args.keep_data:
             shutil.rmtree(run_dir, ignore_errors=True)
@@ -206,10 +297,10 @@ def benchmark_target(
     return BenchmarkResult(
         target=target,
         run_dir=run_dir,
-        num_files=len(files),
+        num_files=num_files,
         total_bytes=total_bytes,
-        write_seconds=write_seconds,
-        read_seconds=read_seconds,
+        write_samples=write_samples,
+        read_samples=read_samples,
     )
 
 
@@ -246,6 +337,7 @@ def summarize_results(results: Iterable[BenchmarkResult]) -> None:
                 "target": str(index),
                 "data_size": format_bytes(result.total_bytes),
                 "files": str(result.num_files),
+                "samples": str(result.num_samples),
                 "write_seconds": f"{result.write_seconds:.2f}",
                 "write_gbps": f"{result.write_throughput_gbps:.2f}",
                 "read_seconds": f"{result.read_seconds:.2f}",
@@ -257,6 +349,7 @@ def summarize_results(results: Iterable[BenchmarkResult]) -> None:
         ("Target #", "target", ">"),
         ("Data Size", "data_size", ">"),
         ("Files", "files", ">"),
+        ("Samples", "samples", ">"),
         ("Write (s)", "write_seconds", ">"),
         ("Write (Gb/s)", "write_gbps", ">"),
         ("Read (s)", "read_seconds", ">"),
@@ -317,6 +410,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Random seed for reproducible tensor generation.",
     )
     parser.add_argument(
+        "--samples",
+        type=int,
+        default=3,
+        help="Number of write/read cycles to run per target (median is reported).",
+    )
+    parser.add_argument(
         "--num-workers",
         type=int,
         default=4,
@@ -354,6 +453,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Call fsync after every write to reduce cache effects.",
     )
     parser.add_argument(
+        "--drop-caches",
+        action="store_true",
+        help=(
+            "Attempt to drop the OS page cache before each read pass (Linux only, "
+            "requires elevated privileges)."
+        ),
+    )
+    parser.add_argument(
         "--keep-data",
         action="store_true",
         help="Do not delete generated data after benchmarking.",
@@ -370,6 +477,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--num-workers cannot be negative")
     if args.prefetch_factor is not None and args.prefetch_factor <= 0:
         raise SystemExit("--prefetch-factor must be positive")
+    if args.samples <= 0:
+        raise SystemExit("--samples must be positive")
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise SystemExit("CUDA device requested but CUDA is not available")
