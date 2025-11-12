@@ -493,17 +493,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     targets = [Path(t) for t in args.targets]
 
     results: List[BenchmarkResult] = []
+    had_failure = False
     for target in targets:
         print(f"\nBenchmarking target: {target}")
         try:
             result = benchmark_target(target, args)
         except Exception as exc:  # pragma: no cover - CLI user feedback
             print(f"Failed to benchmark {target}: {exc}", file=sys.stderr)
-            return 1
+            had_failure = True
+            continue
         results.append(result)
 
     summarize_results(results)
-    return 0
+    return 1 if had_failure else 0
 
 
 if __name__ == "__main__":
