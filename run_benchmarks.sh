@@ -123,8 +123,14 @@ run_test() {
   echo
   echo "======================================================================"
   echo "### $description"
-  printf '# Command:'
-  printf ' %q' "${cmd[@]}"
+  echo '# Command:'
+  local i
+  for ((i = 0; i < ${#cmd[@]}; i++)); do
+    if (( i > 0 )); then
+      printf ' '
+    fi
+    printf '%q' "${cmd[i]}"
+  done
   echo
   echo "----------------------------------------------------------------------"
 
